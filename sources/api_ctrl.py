@@ -166,8 +166,12 @@ def send_attitude_commands(cf: Crazyflie) -> None:
     Args:
         cf (Crazyflie): The Crazyflie instance to send commands to.
     """
+    # IMPORTANT: Unlock the safety lock by sending a zero setpoint
+    cf.commander.send_setpoint(0, 0, 0, 0)
+    time.sleep(0.1)
+
     # Define the command parameters
-    thrust: int = 11000  # Adjust as needed (range: 10001 - 60000)
+    thrust: int = 15000  # Adjust as needed (range: 10001 - 60000)
     roll: float = 0.0  # Roll angle in degrees
     pitch: float = 0.0  # Pitch angle in degrees
     yaw_rate: float = 0.0  # Yaw rate in degrees per second
@@ -175,6 +179,9 @@ def send_attitude_commands(cf: Crazyflie) -> None:
     logger.info("Starting to send attitude commands at 100 Hz...")
     # Calculate the time interval between commands (10 ms)
     interval: float = 0.01
+
+    # log if is connected
+    logger.info(f"Is connected: {is_connected}")
 
     # Continue sending commands until disconnected
     while is_connected:
