@@ -7,8 +7,13 @@ import cflib.crtp
 from cflib.crazyflie import Crazyflie
 from cflib.crazyflie.log import LogConfig
 
-# Configure the logger
-logging.basicConfig(level=logging.INFO)
+# Configure the logger to write to a file with DEBUG level
+logging.basicConfig(
+    filename='crazyflie.log',
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
 logger = logging.getLogger(__name__)
 
 # Global flag to control the main loop
@@ -26,9 +31,6 @@ def connect_callback(uri: str) -> None:
         uri (str): The URI of the connected Crazyflie.
     """
     logger.info(f"Connected to {uri}")
-
-    # Check available variables (optional)
-    # check_available_variables(cf)
 
     # Start logging data at 100 Hz
     start_logging(cf)
@@ -91,6 +93,8 @@ def log_data(timestamp: float, data: Dict[str, Any], logconf: LogConfig) -> None
 def start_logging(cf: Crazyflie) -> None:
     """
     Starts logging of the desired variables from the Crazyflie.
+    NOTE: test against results from client and the result from the python script
+    are somewhat accurate.
 
     Args:
         cf (Crazyflie): The Crazyflie instance to log data from.
@@ -102,29 +106,19 @@ def start_logging(cf: Crazyflie) -> None:
         ('stabilizer.pitch', 'float'),
         ('stabilizer.yaw', 'float'),
 
-        # Angular velocities
-        ('gyro.x', 'float'),
-        ('gyro.y', 'float'),
-        ('gyro.z', 'float'),
+        # Angular velocities # commented out to reduce the number of variables
+        # ('gyro.x', 'float'),
+        # ('gyro.y', 'float'),
+        # ('gyro.z', 'float'),
+
+        # x, y, z position
+        ('stateEstimate.x', 'float'),
+        ('stateEstimate.y', 'float'),
+        ('stateEstimate.z', 'float'),
 
         # Thrust
         ('stabilizer.thrust', 'uint16_t'),
     ]
-
-    # Uncomment the following variables if you have the necessary hardware (e.g., positioning deck)
-    # Position (requires external positioning system)
-    # variables.extend([
-    #     ('stateEstimate.x', 'float'),
-    #     ('stateEstimate.y', 'float'),
-    #     ('stateEstimate.z', 'float'),
-    # ])
-
-    # Velocity (requires external positioning system)
-    # variables.extend([
-    #     ('stateEstimate.vx', 'float'),
-    #     ('stateEstimate.vy', 'float'),
-    #     ('stateEstimate.vz', 'float'),
-    # ])
 
     # Maximum variables per log configuration
     max_vars_per_logconf = 10
@@ -173,7 +167,7 @@ def send_attitude_commands(cf: Crazyflie) -> None:
         cf (Crazyflie): The Crazyflie instance to send commands to.
     """
     # Define the command parameters
-    thrust: int = 15000  # Thrust value (range: 10001 - 60000)
+    thrust: int = 11000  # Adjust as needed (range: 10001 - 60000)
     roll: float = 0.0  # Roll angle in degrees
     pitch: float = 0.0  # Pitch angle in degrees
     yaw_rate: float = 0.0  # Yaw rate in degrees per second
@@ -202,19 +196,6 @@ def send_attitude_commands(cf: Crazyflie) -> None:
     # Stop the motors when disconnected
     cf.commander.send_stop_setpoint()
     logger.info("Stopped sending attitude commands.")
-
-
-def check_available_variables(cf: Crazyflie) -> None:
-    """
-    Logs the available logging variables from the Crazyflie.
-
-    Args:
-        cf (Crazyflie): The Crazyflie instance to query.
-    """
-    available_vars = [variable for variable in cf.log.toc.variables]
-    logger.info("Available log variables:")
-    for var in available_vars:
-        logger.info(f" - {var}")
 
 
 def main() -> None:
