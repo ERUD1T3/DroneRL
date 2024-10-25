@@ -112,6 +112,15 @@ def log_data(timestamp: float, data: Dict[str, Any], logconf: LogConfig) -> None
             data.get('kalman.statePZ', 0.0),
             # Add more elements if your model expects them
         ], dtype=np.float32)
+        # Convert to numpy array
+        obs = np.array(obs, dtype=np.float32)
+        # Pad the observation vector with zeros to reach length 40
+        if len(obs) < 40:
+            obs = np.pad(obs, (0, 40 - len(obs)), 'constant')
+        else:
+            # If obs is longer than 40 elements, truncate it
+            obs = obs[:40]
+        # Update the latest observations
         latest_obs = obs
 
 
