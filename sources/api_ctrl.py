@@ -130,12 +130,12 @@ def start_logging(cf: Crazyflie) -> None:
         ('kalman.statePY', 'float'),
         ('kalman.statePZ', 'float'),
         # Attitude as quaternion
-        ('kalman.q0', 'float'),
-        ('kalman.q1', 'float'),
-        ('kalman.q2', 'float'),
-        ('kalman.q3', 'float'),
+        # ('kalman.q0', 'float'),
+        # ('kalman.q1', 'float'),
+        # ('kalman.q2', 'float'),
+        # ('kalman.q3', 'float'),
         # Thrust
-        # ('stabilizer.thrust', 'uint16_t'),
+        ('stabilizer.thrust', 'uint16_t'),
     ]
 
     # Maximum variables per log configuration
