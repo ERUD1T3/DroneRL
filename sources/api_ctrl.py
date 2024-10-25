@@ -101,23 +101,41 @@ def start_logging(cf: Crazyflie) -> None:
     """
     # Define the variables to log
     variables: List[Tuple[str, str]] = [
-        # Orientation angles
-        ('stabilizer.roll', 'float'),
-        ('stabilizer.pitch', 'float'),
-        ('stabilizer.yaw', 'float'),
+        # # Orientation angles
+        # ('stabilizer.roll', 'float'),
+        # ('stabilizer.pitch', 'float'),
+        # ('stabilizer.yaw', 'float'),
+        #
+        # # Angular velocities # commented out to reduce the number of variables
+        # # ('gyro.x', 'float'),
+        # # ('gyro.y', 'float'),
+        # # ('gyro.z', 'float'),
+        #
+        # # x, y, z position
+        # ('stateEstimate.x', 'float'),
+        # ('stateEstimate.y', 'float'),
+        # ('stateEstimate.z', 'float'),
+        #
+        # # EKF state
+        # ('kalman.stateX', 'float'),
+        # ('kalman.stateY', 'float'),
+        # ('kalman.stateZ', 'float'),
 
-        # Angular velocities # commented out to reduce the number of variables
-        # ('gyro.x', 'float'),
-        # ('gyro.y', 'float'),
-        # ('gyro.z', 'float'),
-
-        # x, y, z position
-        ('stateEstimate.x', 'float'),
-        ('stateEstimate.y', 'float'),
-        ('stateEstimate.z', 'float'),
-
+        # Position estimates
+        ('kalman.stateX', 'float'),
+        ('kalman.stateY', 'float'),
+        ('kalman.stateZ', 'float'),
+        # Velocity estimates
+        ('kalman.statePX', 'float'),
+        ('kalman.statePY', 'float'),
+        ('kalman.statePZ', 'float'),
+        # Attitude as quaternion
+        # ('kalman.q0', 'float'),
+        # ('kalman.q1', 'float'),
+        # ('kalman.q2', 'float'),
+        # ('kalman.q3', 'float'),
         # Thrust
-        ('stabilizer.thrust', 'uint16_t'),
+        # ('stabilizer.thrust', 'uint16_t'),
     ]
 
     # Maximum variables per log configuration
@@ -182,6 +200,8 @@ def send_attitude_commands(cf: Crazyflie) -> None:
 
     # log if is connected
     logger.info(f"Is connected: {is_connected}")
+
+    # TODO: use MC to take off before sending commands
 
     # Continue sending commands until disconnected
     while is_connected:
