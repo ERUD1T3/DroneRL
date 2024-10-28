@@ -250,7 +250,7 @@ def log_data(timestamp: float, data: Dict[str, Any], logconf: LogConfig) -> None
         # Note: Current obs goes first in the 40D vector
         if static_obs is not None:
             # Full 40D observation: [current_obs (20D), previous_obs (20D)]
-            latest_obs = np.concatenate([current_obs, static_obs[:20]])
+            latest_obs = np.concatenate([static_obs[:20], current_obs])
         else:
             # If no previous observation exists, duplicate current
             latest_obs = np.concatenate([current_obs, current_obs])
