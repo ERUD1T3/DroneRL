@@ -192,7 +192,7 @@ def log_data(timestamp: float, data: Dict[str, Any], logconf: LogConfig) -> None
             static_obs = latest_obs.copy()
 
         # Construct current timestep observation (20 dimensions)
-        current_obs: List[float] = []
+        current_obs = []
 
         # 1. Position from Kalman filter (3D)
         current_obs.extend([
@@ -283,7 +283,7 @@ def send_attitude_commands(cf: Crazyflie) -> None:
 
         if elapsed_time < takeoff_duration:
             # Takeoff phase
-            thrust = 37000
+            thrust = 45000
             roll = 0.0
             pitch = 0.0
             yaw_rate = 0.0
@@ -302,7 +302,7 @@ def send_attitude_commands(cf: Crazyflie) -> None:
                 with torch.no_grad():
                     action, *_ = ac(obs_tensor)
                     # Store raw model outputs
-                    last_model_outputs = action.numpy()
+                    last_model_outputs = action
 
                 # Map action to roll, pitch, yaw_rate, thrust
                 thrust = (action[0] + 1) / 2 * (60000 - 10001) + 10001
