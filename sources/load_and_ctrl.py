@@ -305,7 +305,7 @@ def send_attitude_commands(cf: Crazyflie) -> None:
                     last_model_outputs = action
 
                 # Map action to roll, pitch, yaw_rate, thrust
-                thrust = (action[0] + 1) / 2 * (60000 - 10001) + 10001
+                thrust = action[0] * (60000 - 10001) + 10001
                 thrust = np.clip(thrust, 10001, 60000)
 
                 max_roll_pitch = 30.0
