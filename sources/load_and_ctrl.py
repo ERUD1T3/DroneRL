@@ -283,7 +283,7 @@ def send_attitude_commands(cf: Crazyflie) -> None:
 
         if elapsed_time < takeoff_duration:
             # Takeoff phase
-            thrust = 45000
+            thrust = 40000
             roll = 0.0
             pitch = 0.0
             yaw_rate = 0.0
