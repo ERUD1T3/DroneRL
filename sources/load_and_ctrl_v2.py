@@ -32,7 +32,7 @@ class ScalingParams:
     # Angular velocity scaling (real: [-250, 250]°/s -> sim: [-1.0, 1.0])
     ANG_VEL_SCALE = 250.0
     # Action scaling (from simulation to real)
-    THRUST_MIN, THRUST_MAX = 35000, 55000  # Real thrust range
+    THRUST_MIN, THRUST_MAX = 40000, 60000  # Real thrust range
     ATTITUDE_LIMIT = 10.0  # Real attitude limit in degrees
     YAW_RATE_LIMIT = 10.0  # Real yaw rate limit in deg/s
 
@@ -87,6 +87,14 @@ def create_log_configs(cf: Crazyflie) -> List[LogConfig]:
     return log_configs
 
 
+def real_to_scaled_position(real_pos: np.ndarray) -> np.ndarray:
+    """Convert real-world position to scaled position for model input"""
+    scaled_pos = np.array(real_pos)  # Copy to avoid modifying input
+    scaled_pos[0:2] = np.clip(scaled_pos[0:2] / ScalingParams.POS_SCALE, -1.0, 1.0)  # Scale and clip x,y
+    scaled_pos[2] = (scaled_pos[2] - ScalingParams.ALT_MIN) / (ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)  # Scale z
+    return scaled_pos
+
+
 def scale_action_to_real(action: np.ndarray) -> Tuple[float, float, float, float]:
     """Scale neural network outputs to real drone commands"""
     # Thrust scaling (from [-1, 1] to [THRUST_MIN, THRUST_MAX])
@@ -129,6 +137,15 @@ class ObservationHandler:
         }
         self.lock = threading.Lock()
         self.previous_obs = None
+        self.target_position = np.array([0.0, 0.0, 1.0])  # Default target
+
+    def real_to_scaled_position(self, real_pos: np.ndarray) -> np.ndarray:
+        """Convert real-world position to scaled position for model input"""
+        scaled_pos = np.array(real_pos)  # Copy to avoid modifying input
+        scaled_pos[0:2] = np.clip(scaled_pos[0:2] / ScalingParams.POS_SCALE, -1.0, 1.0)  # Scale and clip x,y
+        scaled_pos[2] = (scaled_pos[2] - ScalingParams.ALT_MIN) / (
+                ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)  # Scale z
+        return scaled_pos
 
     def update_data(self, group: str, timestamp: float, data: Dict[str, float]):
         """Update latest sensor data for a group"""
@@ -147,14 +164,19 @@ class ObservationHandler:
                 return None
 
             try:
-                # Position (scale to [-1, 1])
+                # Get current position and scale it
                 position = np.array([
                     self.latest_data['position']['kalman.stateX'],
                     self.latest_data['position']['kalman.stateY'],
                     self.latest_data['position']['kalman.stateZ']
                 ])
-                position[:2] = np.clip(position[:2] / ScalingParams.POS_SCALE, -1.0, 1.0)
-                position[2] = (position[2] - ScalingParams.ALT_MIN) / (ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)
+                scaled_position = self.real_to_scaled_position(position)
+
+                # Scale target position
+                scaled_target = self.real_to_scaled_position(self.target_position)
+
+                # Calculate position error in scaled space
+                position_error = scaled_target - scaled_position
 
                 # Quaternions (already in [-1, 1])
                 quaternions = np.array([
@@ -179,19 +201,9 @@ class ObservationHandler:
                 ])
                 angular_vel = np.clip(angular_vel / ScalingParams.ANG_VEL_SCALE, -1.0, 1.0)
 
-                # Calculate position error
-                timestamp = self.latest_data['timestamp']
-                alpha = 2.0 * np.pi / 3.0
-                target = np.array([
-                    0.25 * (1.0 - np.cos(timestamp * alpha)),
-                    0.25 * np.sin(timestamp * alpha),
-                    1.0
-                ])
-                position_error = target - position[:3]  # Use unscaled position for error
-
                 # Combine all components for current timestep
                 current_obs = np.concatenate([
-                    position,
+                    scaled_position,
                     quaternions,
                     linear_vel,
                     angular_vel,
@@ -226,6 +238,13 @@ class CrazyflieController:
         self.cf = Crazyflie()
         self.is_connected = True
         self.last_model_outputs = np.zeros(4, dtype=np.float32)
+
+        # Add parameters for back and forth motion
+        self.start_position = np.array([0.0, 0.0, 1.0])  # Starting position
+        self.motion_amplitude = 0.3  # 30cm back and forth
+        self.motion_period = 4.0  # seconds for one complete cycle
+        self.lookahead_time = 0.5  # seconds to look ahead for target
+        self.start_time = None
 
         # Create observation handler
         self.obs_handler = ObservationHandler(model_path)
@@ -283,6 +302,27 @@ class CrazyflieController:
 
             time.sleep(0.1)
 
+    def get_target_position(self, current_time: float) -> np.ndarray:
+        """Calculate target position based on time"""
+        if self.start_time is None:
+            self.start_time = current_time
+
+        elapsed = current_time - self.start_time
+        phase = 2.0 * np.pi * elapsed / self.motion_period
+
+        # Calculate current position in cycle
+        x_offset = self.motion_amplitude * np.sin(phase)
+
+        # Add lookahead to help model track better
+        phase_ahead = 2.0 * np.pi * (elapsed + self.lookahead_time) / self.motion_period
+        x_target = self.motion_amplitude * np.sin(phase_ahead)
+
+        return np.array([
+            self.start_position[0] + x_target,  # Move in x direction
+            self.start_position[1],  # Fixed y
+            self.start_position[2]  # Fixed height
+        ])
+
     def _control_loop(self):
         """Main control loop"""
         self.cf.commander.send_setpoint(0, 0, 0, 0)  # Unlock the safety lock
@@ -306,6 +346,10 @@ class CrazyflieController:
                 self.last_model_outputs = np.zeros(4)
                 self.logger.debug(f"Takeoff phase: {elapsed:.2f}s, thrust={commands[0]}")
             else:
+                # Update target based on current time
+                current_target = self.get_target_position(loop_start)
+                self.obs_handler.target_position = current_target
+
                 # Neural network control phase
                 obs = self.obs_handler.construct_observation(self.last_model_outputs)
 
