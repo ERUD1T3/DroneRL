@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict, List, Tuple, Optional, NamedTuple
@@ -46,22 +47,28 @@ def setup_logging() -> logging.Logger:
     )
     return logging.getLogger(__name__)
 
+
 logger = setup_logging()
 
+
 def create_log_configs(cf: Crazyflie) -> List[LogConfig]:
-    """Create multiple logging configurations to stay within size limits"""
+    """Create multiple smaller logging configurations"""
     log_configs = []
 
-    # Position + Quaternions
-    pos_quat_config = LogConfig(name="pos_quat", period_in_ms=10)
-    pos_quat_config.add_variable("kalman.stateX", "float")
-    pos_quat_config.add_variable("kalman.stateY", "float")
-    pos_quat_config.add_variable("kalman.stateZ", "float")
-    pos_quat_config.add_variable("kalman.q0", "float")
-    pos_quat_config.add_variable("kalman.q1", "float")
-    pos_quat_config.add_variable("kalman.q2", "float")
-    pos_quat_config.add_variable("kalman.q3", "float")
-    log_configs.append(pos_quat_config)
+    # Position only
+    pos_config = LogConfig(name="position", period_in_ms=10)
+    pos_config.add_variable("kalman.stateX", "float")
+    pos_config.add_variable("kalman.stateY", "float")
+    pos_config.add_variable("kalman.stateZ", "float")
+    log_configs.append(pos_config)
+
+    # Quaternions only
+    quat_config = LogConfig(name="quaternion", period_in_ms=10)
+    quat_config.add_variable("kalman.q0", "float")
+    quat_config.add_variable("kalman.q1", "float")
+    quat_config.add_variable("kalman.q2", "float")
+    quat_config.add_variable("kalman.q3", "float")
+    log_configs.append(quat_config)
 
     # Linear velocities
     vel_config = LogConfig(name="velocities", period_in_ms=10)
@@ -103,17 +110,19 @@ class ObservationHandler:
 
     def __init__(self, model_path: str):
         # Load standardization parameters (mean, std) from model
-        try:
-            scaling_data = np.load(f"{model_path}/observation_scaling.npz")
+        scaling_path = f"{model_path}/observation_scaling.npz" if model_path else None
+        if scaling_path and os.path.exists(scaling_path):
+            scaling_data = np.load(scaling_path)
             self.obs_mean = scaling_data['mean']
             self.obs_std = scaling_data['std']
-        except (FileNotFoundError, KeyError) as e:
-            logger.warning(f"Could not load scaling parameters: {e}. Using defaults.")
-            self.obs_mean = np.zeros(40)  # Full observation space
+        else:
+            logger.warning("Using default scaling parameters")
+            self.obs_mean = np.zeros(40)
             self.obs_std = np.ones(40)
 
         self.latest_data = {
-            'pos_quat': None,
+            'position': None,
+            'quaternion': None,
             'velocities': None,
             'gyro': None,
             'timestamp': None
@@ -126,79 +135,88 @@ class ObservationHandler:
         with self.lock:
             self.latest_data[group] = data
             self.latest_data['timestamp'] = timestamp
+            logger.debug(f"Updated {group} data: {data}")
 
     def construct_observation(self, last_actions: np.ndarray) -> Optional[np.ndarray]:
         """Construct scaled and standardized observation"""
         with self.lock:
             # Check if we have all required data
             if any(v is None for v in self.latest_data.values()):
+                missing = [k for k, v in self.latest_data.items() if v is None]
+                logger.warning(f"Missing data from: {missing}")
                 return None
 
-            # Position (scale to [-1, 1])
-            position = np.array([
-                self.latest_data['pos_quat']['kalman.stateX'],
-                self.latest_data['pos_quat']['kalman.stateY'],
-                self.latest_data['pos_quat']['kalman.stateZ']
-            ])
-            position[:2] = np.clip(position[:2] / ScalingParams.POS_SCALE, -1.0, 1.0)
-            position[2] = (position[2] - ScalingParams.ALT_MIN) / (ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)
+            try:
+                # Position (scale to [-1, 1])
+                position = np.array([
+                    self.latest_data['position']['kalman.stateX'],
+                    self.latest_data['position']['kalman.stateY'],
+                    self.latest_data['position']['kalman.stateZ']
+                ])
+                position[:2] = np.clip(position[:2] / ScalingParams.POS_SCALE, -1.0, 1.0)
+                position[2] = (position[2] - ScalingParams.ALT_MIN) / (ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)
 
-            # Quaternions (already in [-1, 1])
-            quaternions = np.array([
-                self.latest_data['pos_quat']['kalman.q0'],
-                self.latest_data['pos_quat']['kalman.q1'],
-                self.latest_data['pos_quat']['kalman.q2'],
-                self.latest_data['pos_quat']['kalman.q3']
-            ])
+                # Quaternions (already in [-1, 1])
+                quaternions = np.array([
+                    self.latest_data['quaternion']['kalman.q0'],
+                    self.latest_data['quaternion']['kalman.q1'],
+                    self.latest_data['quaternion']['kalman.q2'],
+                    self.latest_data['quaternion']['kalman.q3']
+                ])
 
-            # Linear velocities (assumed to match sim scale)
-            linear_vel = np.array([
-                self.latest_data['velocities']['kalman.statePX'],
-                self.latest_data['velocities']['kalman.statePY'],
-                self.latest_data['velocities']['kalman.statePZ']
-            ])
+                # Linear velocities (assumed to match sim scale)
+                linear_vel = np.array([
+                    self.latest_data['velocities']['kalman.statePX'],
+                    self.latest_data['velocities']['kalman.statePY'],
+                    self.latest_data['velocities']['kalman.statePZ']
+                ])
 
-            # Angular velocities (scale to [-1, 1])
-            angular_vel = np.array([
-                self.latest_data['gyro']['gyro.x'],
-                self.latest_data['gyro']['gyro.y'],
-                self.latest_data['gyro']['gyro.z']
-            ])
-            angular_vel = np.clip(angular_vel / ScalingParams.ANG_VEL_SCALE, -1.0, 1.0)
+                # Angular velocities (scale to [-1, 1])
+                angular_vel = np.array([
+                    self.latest_data['gyro']['gyro.x'],
+                    self.latest_data['gyro']['gyro.y'],
+                    self.latest_data['gyro']['gyro.z']
+                ])
+                angular_vel = np.clip(angular_vel / ScalingParams.ANG_VEL_SCALE, -1.0, 1.0)
 
-            # Calculate position error
-            timestamp = self.latest_data['timestamp']
-            alpha = 2.0 * np.pi / 3.0
-            target = np.array([
-                0.25 * (1.0 - np.cos(timestamp * alpha)),
-                0.25 * np.sin(timestamp * alpha),
-                1.0
-            ])
-            position_error = target - position[:3]  # Use unscaled position for error
+                # Calculate position error
+                timestamp = self.latest_data['timestamp']
+                alpha = 2.0 * np.pi / 3.0
+                target = np.array([
+                    0.25 * (1.0 - np.cos(timestamp * alpha)),
+                    0.25 * np.sin(timestamp * alpha),
+                    1.0
+                ])
+                position_error = target - position[:3]  # Use unscaled position for error
 
-            # Combine all components for current timestep
-            current_obs = np.concatenate([
-                position,
-                quaternions,
-                linear_vel,
-                angular_vel,
-                position_error,
-                last_actions
-            ])
+                # Combine all components for current timestep
+                current_obs = np.concatenate([
+                    position,
+                    quaternions,
+                    linear_vel,
+                    angular_vel,
+                    position_error,
+                    last_actions
+                ])
 
-            # Handle previous observation
-            if self.previous_obs is None:
-                full_obs = np.concatenate([current_obs, current_obs])
-            else:
-                full_obs = np.concatenate([self.previous_obs, current_obs])
+                # Handle previous observation
+                if self.previous_obs is None:
+                    full_obs = np.concatenate([current_obs, current_obs])
+                else:
+                    full_obs = np.concatenate([self.previous_obs, current_obs])
 
-            # Store current observation for next timestep
-            self.previous_obs = current_obs
+                # Store current observation for next timestep
+                self.previous_obs = current_obs
 
-            # Standardize observation
-            obs_standardized = (full_obs - self.obs_mean) / self.obs_std
+                # Standardize observation
+                obs_standardized = (full_obs - self.obs_mean) / self.obs_std
 
-            return obs_standardized
+                logger.debug(f"Successfully constructed observation: {obs_standardized}")
+                return obs_standardized
+
+            except Exception as e:
+                logger.error(f"Error constructing observation: {e}")
+                return None
 
 
 class CrazyflieController:
@@ -242,7 +260,11 @@ class CrazyflieController:
 
     def _log_data_callback(self, timestamp: float, data: Dict[str, Any], logconf: LogConfig):
         """Process incoming sensor data"""
-        self.obs_handler.update_data(logconf.name, timestamp, data)
+        try:
+            self.obs_handler.update_data(logconf.name, timestamp, data)
+            self.logger.debug(f"Received {logconf.name} data: {data}")
+        except Exception as e:
+            self.logger.error(f"Error processing {logconf.name} data: {e}")
 
     def _start_logging(self):
         """Start all logging configurations"""
@@ -274,6 +296,10 @@ class CrazyflieController:
             loop_start = time.time()
             elapsed = time.time() - start_time
 
+            # Log all current sensor data
+            with self.obs_handler.lock:
+                self.logger.debug(f"Current sensor data: {self.obs_handler.latest_data}")
+
             if elapsed < takeoff_duration:
                 # Takeoff phase
                 commands = (46000, 0.0, 0.0, 0.0)
@@ -282,7 +308,6 @@ class CrazyflieController:
             else:
                 # Neural network control phase
                 obs = self.obs_handler.construct_observation(self.last_model_outputs)
-                self.logger.debug(f"Observation: {obs}")
 
                 if obs is not None:
                     obs_tensor = torch.as_tensor(obs, dtype=torch.float32)
@@ -319,13 +344,19 @@ class CrazyflieController:
         """Stop the Crazyflie controller"""
         self.is_connected = False
         self.cf.close_link()
+        self.logger.info("Closing link")
 
 
 def main():
     global ac
     # Load the trained model
     model_path = "C:/Users/the_3/DroneRL/modules/phoenix-pybullet/saves/DroneCircleBulletEnv-v0/ppo/AttitudeMod/seed_65025"
-    ac, _ = load_actor_critic_and_env_from_disk(model_path)
+    try:
+        ac, _ = load_actor_critic_and_env_from_disk(model_path)
+        logger.info("Successfully loaded model from disk")
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        return
 
     # Create and start controller
     controller = CrazyflieController(model_path=model_path)
@@ -333,9 +364,15 @@ def main():
         controller.start()
         while controller.is_connected:
             time.sleep(1)
+            # Print periodic status updates
+            logger.info("Controller running - press Ctrl+C to stop")
     except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+    finally:
         controller.stop()
-        print("Interrupted by user. Shutting down.")
+        logger.info("Shutting down")
 
 
 if __name__ == '__main__':
