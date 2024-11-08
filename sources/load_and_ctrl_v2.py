@@ -32,7 +32,7 @@ class ScalingParams:
     # Angular velocity scaling (real: [-250, 250]°/s -> sim: [-1.0, 1.0])
     ANG_VEL_SCALE = 250.0
     # Action scaling (from simulation to real)
-    THRUST_MIN, THRUST_MAX = 40000, 60000  # Real thrust range
+    THRUST_MIN, THRUST_MAX = 35000, 55000  # Real thrust range
     ATTITUDE_LIMIT = 10.0  # Real attitude limit in degrees
     YAW_RATE_LIMIT = 10.0  # Real yaw rate limit in deg/s
 
