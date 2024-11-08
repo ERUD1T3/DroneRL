@@ -313,7 +313,7 @@ class CrazyflieController:
                     obs_tensor = torch.as_tensor(obs, dtype=torch.float32)
                     with torch.no_grad():
                         action, *_ = ac(obs_tensor)
-                        self.last_model_outputs = action.numpy()
+                        self.last_model_outputs = action
                         commands = scale_action_to_real(action)
                 else:
                     commands = (35000, 0.0, 0.0, 0.0)  # Safe default
