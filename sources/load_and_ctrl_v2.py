@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from typing import Any, Dict, Tuple, NamedTuple
+from typing import Any, Dict, List, Tuple, Optional, NamedTuple
 
 import cflib.crtp
 import numpy as np
@@ -46,19 +46,38 @@ def setup_logging() -> logging.Logger:
     )
     return logging.getLogger(__name__)
 
+logger = setup_logging()
 
-def scale_position(pos: np.ndarray) -> np.ndarray:
-    """Scale position from real to simulation space"""
-    # XY scaling
-    pos[:2] = np.clip(pos[:2] / ScalingParams.POS_SCALE, -1.0, 1.0)
-    # Z scaling
-    pos[2] = (pos[2] - ScalingParams.ALT_MIN) / (ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)
-    return pos
+def create_log_configs(cf: Crazyflie) -> List[LogConfig]:
+    """Create multiple logging configurations to stay within size limits"""
+    log_configs = []
 
+    # Position + Quaternions
+    pos_quat_config = LogConfig(name="pos_quat", period_in_ms=10)
+    pos_quat_config.add_variable("kalman.stateX", "float")
+    pos_quat_config.add_variable("kalman.stateY", "float")
+    pos_quat_config.add_variable("kalman.stateZ", "float")
+    pos_quat_config.add_variable("kalman.q0", "float")
+    pos_quat_config.add_variable("kalman.q1", "float")
+    pos_quat_config.add_variable("kalman.q2", "float")
+    pos_quat_config.add_variable("kalman.q3", "float")
+    log_configs.append(pos_quat_config)
 
-def scale_angular_velocity(ang_vel: np.ndarray) -> np.ndarray:
-    """Scale angular velocity from real to simulation space"""
-    return np.clip(ang_vel / ScalingParams.ANG_VEL_SCALE, -1.0, 1.0)
+    # Linear velocities
+    vel_config = LogConfig(name="velocities", period_in_ms=10)
+    vel_config.add_variable("kalman.statePX", "float")
+    vel_config.add_variable("kalman.statePY", "float")
+    vel_config.add_variable("kalman.statePZ", "float")
+    log_configs.append(vel_config)
+
+    # Angular velocities
+    gyro_config = LogConfig(name="gyro", period_in_ms=10)
+    gyro_config.add_variable("gyro.x", "float")
+    gyro_config.add_variable("gyro.y", "float")
+    gyro_config.add_variable("gyro.z", "float")
+    log_configs.append(gyro_config)
+
+    return log_configs
 
 
 def scale_action_to_real(action: np.ndarray) -> Tuple[float, float, float, float]:
@@ -79,73 +98,126 @@ def scale_action_to_real(action: np.ndarray) -> Tuple[float, float, float, float
     )
 
 
-def construct_observation(data: Dict[str, float], timestamp: float, last_actions: np.ndarray) -> np.ndarray:
-    """Construct the scaled observation vector from sensor data"""
-    # Extract position and scale
-    position = np.array([
-        data.get('kalman.stateX', 0.0),
-        data.get('kalman.stateY', 0.0),
-        data.get('kalman.stateZ', 0.0)
-    ])
-    position = scale_position(position)
+class ObservationHandler:
+    """Handles observation processing, scaling and standardization"""
 
-    # Extract quaternions (already in correct range [-1, 1])
-    quaternions = np.array([
-        data.get('kalman.q0', 0.0),
-        data.get('kalman.q1', 0.0),
-        data.get('kalman.q2', 0.0),
-        data.get('kalman.q3', 0.0)
-    ])
+    def __init__(self, model_path: str):
+        # Load standardization parameters (mean, std) from model
+        try:
+            scaling_data = np.load(f"{model_path}/observation_scaling.npz")
+            self.obs_mean = scaling_data['mean']
+            self.obs_std = scaling_data['std']
+        except (FileNotFoundError, KeyError) as e:
+            logger.warning(f"Could not load scaling parameters: {e}. Using defaults.")
+            self.obs_mean = np.zeros(40)  # Full observation space
+            self.obs_std = np.ones(40)
 
-    # Extract and scale linear velocities
-    linear_vel = np.array([
-        data.get('kalman.statePX', 0.0),
-        data.get('kalman.statePY', 0.0),
-        data.get('kalman.statePZ', 0.0)
-    ])
-    # Linear velocities are assumed to match simulation scale
+        self.latest_data = {
+            'pos_quat': None,
+            'velocities': None,
+            'gyro': None,
+            'timestamp': None
+        }
+        self.lock = threading.Lock()
+        self.previous_obs = None
 
-    # Extract and scale angular velocities
-    angular_vel = np.array([
-        data.get('gyro.x', 0.0),
-        data.get('gyro.y', 0.0),
-        data.get('gyro.z', 0.0)
-    ])
-    angular_vel = scale_angular_velocity(angular_vel)
+    def update_data(self, group: str, timestamp: float, data: Dict[str, float]):
+        """Update latest sensor data for a group"""
+        with self.lock:
+            self.latest_data[group] = data
+            self.latest_data['timestamp'] = timestamp
 
-    # Calculate scaled position error
-    alpha = 2.0 * np.pi / 3.0
-    target = np.array([
-        0.25 * (1.0 - np.cos(timestamp * alpha)),
-        0.25 * np.sin(timestamp * alpha),
-        1.0
-    ])
-    position_error = target - position
+    def construct_observation(self, last_actions: np.ndarray) -> Optional[np.ndarray]:
+        """Construct scaled and standardized observation"""
+        with self.lock:
+            # Check if we have all required data
+            if any(v is None for v in self.latest_data.values()):
+                return None
 
-    # Combine all components
-    return np.concatenate([
-        position,
-        quaternions,
-        linear_vel,
-        angular_vel,
-        position_error,
-        last_actions
-    ])
+            # Position (scale to [-1, 1])
+            position = np.array([
+                self.latest_data['pos_quat']['kalman.stateX'],
+                self.latest_data['pos_quat']['kalman.stateY'],
+                self.latest_data['pos_quat']['kalman.stateZ']
+            ])
+            position[:2] = np.clip(position[:2] / ScalingParams.POS_SCALE, -1.0, 1.0)
+            position[2] = (position[2] - ScalingParams.ALT_MIN) / (ScalingParams.ALT_MAX - ScalingParams.ALT_MIN)
+
+            # Quaternions (already in [-1, 1])
+            quaternions = np.array([
+                self.latest_data['pos_quat']['kalman.q0'],
+                self.latest_data['pos_quat']['kalman.q1'],
+                self.latest_data['pos_quat']['kalman.q2'],
+                self.latest_data['pos_quat']['kalman.q3']
+            ])
+
+            # Linear velocities (assumed to match sim scale)
+            linear_vel = np.array([
+                self.latest_data['velocities']['kalman.statePX'],
+                self.latest_data['velocities']['kalman.statePY'],
+                self.latest_data['velocities']['kalman.statePZ']
+            ])
+
+            # Angular velocities (scale to [-1, 1])
+            angular_vel = np.array([
+                self.latest_data['gyro']['gyro.x'],
+                self.latest_data['gyro']['gyro.y'],
+                self.latest_data['gyro']['gyro.z']
+            ])
+            angular_vel = np.clip(angular_vel / ScalingParams.ANG_VEL_SCALE, -1.0, 1.0)
+
+            # Calculate position error
+            timestamp = self.latest_data['timestamp']
+            alpha = 2.0 * np.pi / 3.0
+            target = np.array([
+                0.25 * (1.0 - np.cos(timestamp * alpha)),
+                0.25 * np.sin(timestamp * alpha),
+                1.0
+            ])
+            position_error = target - position[:3]  # Use unscaled position for error
+
+            # Combine all components for current timestep
+            current_obs = np.concatenate([
+                position,
+                quaternions,
+                linear_vel,
+                angular_vel,
+                position_error,
+                last_actions
+            ])
+
+            # Handle previous observation
+            if self.previous_obs is None:
+                full_obs = np.concatenate([current_obs, current_obs])
+            else:
+                full_obs = np.concatenate([self.previous_obs, current_obs])
+
+            # Store current observation for next timestep
+            self.previous_obs = current_obs
+
+            # Standardize observation
+            obs_standardized = (full_obs - self.obs_mean) / self.obs_std
+
+            return obs_standardized
 
 
 class CrazyflieController:
-    def __init__(self, uri: str = 'radio://0/80/2M'):
+    def __init__(self, uri: str = 'radio://0/80/2M', model_path: str = None):
         self.uri = uri
-        self.logger = setup_logging()
+        self.logger = logger
         self.cf = Crazyflie()
         self.is_connected = True
-        self.latest_obs = None
         self.last_model_outputs = np.zeros(4, dtype=np.float32)
-        self.obs_lock = threading.Lock()
+
+        # Create observation handler
+        self.obs_handler = ObservationHandler(model_path)
+        self.model_path = model_path
+
+        # Setup callbacks
         self._setup_callbacks()
 
     def _setup_callbacks(self):
-        """Setup Crazyflie callback functions"""
+        """Setup connection callbacks"""
         self.cf.connected.add_callback(self._connected)
         self.cf.disconnected.add_callback(self._disconnected)
         self.cf.connection_failed.add_callback(self._connection_failed)
@@ -170,37 +242,23 @@ class CrazyflieController:
 
     def _log_data_callback(self, timestamp: float, data: Dict[str, Any], logconf: LogConfig):
         """Process incoming sensor data"""
-        with self.obs_lock:
-            static_obs = self.latest_obs.copy() if self.latest_obs is not None else None
-            current_obs = construct_observation(data, timestamp, self.last_model_outputs)
-
-            if static_obs is not None:
-                self.latest_obs = np.concatenate([static_obs[:20], current_obs])
-            else:
-                self.latest_obs = np.concatenate([current_obs, current_obs])
-
-            self.logger.debug(f'Latest observation: {self.latest_obs}, shape={self.latest_obs.shape}')
+        self.obs_handler.update_data(logconf.name, timestamp, data)
 
     def _start_logging(self):
-        """Configure and start sensor logging"""
-        variables = [
-            ('kalman.stateX', 'float'), ('kalman.stateY', 'float'),
-            ('kalman.stateZ', 'float'), ('kalman.q0', 'float'),
-            ('kalman.q1', 'float'), ('kalman.q2', 'float'),
-            ('kalman.q3', 'float'), ('kalman.statePX', 'float'),
-            ('kalman.statePY', 'float'), ('kalman.statePZ', 'float'),
-            ('gyro.x', 'float'), ('gyro.y', 'float'), ('gyro.z', 'float')
-        ]
+        """Start all logging configurations"""
+        log_configs = create_log_configs(self.cf)
 
-        for idx, var_chunk in enumerate([variables[i:i + 7] for i in range(0, len(variables), 7)]):
-            log_conf = LogConfig(name=f'StateEstimation_{idx}', period_in_ms=10)
+        for config in log_configs:
+            try:
+                self.cf.log.add_config(config)
+                config.data_received_cb.add_callback(self._log_data_callback)
+                config.start()
+                self.logger.info(f"Started logging config: {config.name}")
+            except AttributeError as e:
+                self.logger.error(f"Could not add log config {config.name}: {e}")
+            except KeyError as e:
+                self.logger.error(f"Could not start log config {config.name}: {e}")
 
-            for var_name, var_type in var_chunk:
-                log_conf.add_variable(var_name, var_type)
-
-            self.cf.log.add_config(log_conf)
-            log_conf.data_received_cb.add_callback(self._log_data_callback)
-            log_conf.start()
             time.sleep(0.1)
 
     def _control_loop(self):
@@ -218,33 +276,39 @@ class CrazyflieController:
 
             if elapsed < takeoff_duration:
                 # Takeoff phase
-                commands = (40000, 0.0, 0.0, 0.0)
+                commands = (46000, 0.0, 0.0, 0.0)
                 self.last_model_outputs = np.zeros(4)
-                self.logger.debug(f'Takeoff phase: {elapsed:.2f}s, thrust={commands[0]}')
+                self.logger.debug(f"Takeoff phase: {elapsed:.2f}s, thrust={commands[0]}")
             else:
                 # Neural network control phase
-                with self.obs_lock:
-                    if self.latest_obs is not None:
-                        obs_tensor = torch.as_tensor(self.latest_obs, dtype=torch.float32)
-                        with torch.no_grad():
-                            action, *_ = ac(obs_tensor)
-                            self.last_model_outputs = action.numpy()
-                            commands = scale_action_to_real(action)
-                    else:
-                        commands = (10000, 0.0, 0.0, 0.0)
-                        self.last_model_outputs = np.zeros(4)
+                obs = self.obs_handler.construct_observation(self.last_model_outputs)
+                self.logger.debug(f"Observation: {obs}")
+
+                if obs is not None:
+                    obs_tensor = torch.as_tensor(obs, dtype=torch.float32)
+                    with torch.no_grad():
+                        action, *_ = ac(obs_tensor)
+                        self.last_model_outputs = action.numpy()
+                        commands = scale_action_to_real(action)
+                else:
+                    commands = (35000, 0.0, 0.0, 0.0)  # Safe default
+                    self.last_model_outputs = np.zeros(4)
+                    self.logger.warning("No observation available")
 
             thrust, roll, pitch, yaw_rate = commands
-
             self.cf.commander.send_setpoint(roll, pitch, yaw_rate, int(thrust))
-            self.logger.debug(f'Computed action: roll={roll}, pitch={pitch}, yaw_rate={yaw_rate}, thrust={thrust}')
+            self.logger.debug(
+                f"Sending setpoint: roll={roll:.2f}, pitch={pitch:.2f}, yaw_rate={yaw_rate:.2f}, thrust={thrust:.0f}")
 
             # Maintain timing
             elapsed_loop = time.time() - loop_start
             if elapsed_loop < interval:
                 time.sleep(interval - elapsed_loop)
+            else:
+                self.logger.warning(f"Loop took longer than interval: {elapsed_loop:.4f}s")
 
         self.cf.commander.send_stop_setpoint()
+        self.logger.info("Control loop stopped")
 
     def start(self):
         """Start the Crazyflie controller"""
@@ -263,10 +327,8 @@ def main():
     model_path = "C:/Users/the_3/DroneRL/modules/phoenix-pybullet/saves/DroneCircleBulletEnv-v0/ppo/AttitudeMod/seed_65025"
     ac, _ = load_actor_critic_and_env_from_disk(model_path)
 
-
-
     # Create and start controller
-    controller = CrazyflieController()
+    controller = CrazyflieController(model_path=model_path)
     try:
         controller.start()
         while controller.is_connected:
